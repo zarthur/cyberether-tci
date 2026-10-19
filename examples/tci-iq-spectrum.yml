@@ -1,0 +1,62 @@
+version: 2
+title: AetherSDR TCI IQ Spectrum
+summary: Display the received TCI IQ stream from AetherSDR.
+description: Connects one receive-only TCI IQ subscription to the spectrum analyzer. Keep tuning in AetherSDR.
+graph:
+  - name: tci_iq_source
+    module: tci_iq_source
+    device: cpu
+    runtime: native
+    provider: generic
+    config:
+      host: 127.0.0.1
+      port: 50001
+      receiver: 0
+      sampleRateHz: 48000
+      bufferSize: 2048
+    meta:
+      node:
+        x: 320
+        y: 220
+        width: 320
+        height: 0
+  - name: throttle
+    module: throttle
+    device: cpu
+    runtime: native
+    provider: generic
+    config:
+      intervalMs: 43
+    input:
+      buffer: '${graph.tci_iq_source.output.signal}'
+    meta:
+      node:
+        x: 700
+        y: 220
+        width: 140
+        height: 0
+  - name: spectrum_analyzer
+    module: spectrum_analyzer
+    device: cpu
+    runtime: native
+    provider: generic
+    config:
+      lineplotAveraging: 4
+      waterfallAveraging: 2
+      maxHold: false
+      fill: true
+      rangeMin: -100
+      rangeMax: 0
+      waterfallHeight: 768
+      splitRatio: 0.5
+      xLabel: Frequency (Hz)
+      amplitudeLabel: Amplitude (dBFS)
+      waterfallLabel: Time
+    input:
+      buffer: '${graph.throttle.output.buffer}'
+    meta:
+      node:
+        x: 820
+        y: 220
+        width: 608
+        height: 672

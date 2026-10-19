@@ -1,0 +1,21 @@
+name: Synthetic protocol checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  protocol-fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure synthetic-only test target
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build client and protocol fixtures
+        run: cmake --build build --parallel
+      - name: Run synthetic TCI fixtures
+        run: ctest --test-dir build --output-on-failure
