@@ -2,9 +2,13 @@
 """Package this plugin's already-built target using CyberEther's .cep manifest format."""
 
 import argparse
+import gzip
 import io
 import os
 from pathlib import Path, PurePosixPath
+import re
+import shutil
+import subprocess
 import tarfile
 import tempfile
 
@@ -54,6 +58,95 @@ def add_file(tar, path, name):
         tar.addfile(info, source)
 
 
+def parse_macho_dependencies(output):
+    """Return dylib install names reported by ``otool -L``."""
+    dependencies = []
+    for line in output.splitlines()[1:]:
+        match = re.match(r"\s*(.+?)\s+\(compatibility version ", line)
+        if match:
+            dependencies.append(match.group(1))
+    return dependencies
+
+
+def parse_macho_rpaths(output):
+    """Return LC_RPATH values reported by ``otool -l``."""
+    paths = []
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "cmd LC_RPATH":
+            continue
+        for candidate in lines[index + 1:index + 4]:
+            match = re.match(r"\s*path\s+(.+?)\s+\(offset \d+\)", candidate)
+            if match:
+                paths.append(match.group(1))
+                break
+    return paths
+
+
+def _run_tool(command):
+    try:
+        return subprocess.run(command, check=True, text=True, capture_output=True).stdout
+    except FileNotFoundError as error:
+        raise SystemExit(f"required macOS packaging tool is missing: {command[0]}") from error
+    except subprocess.CalledProcessError as error:
+        detail = error.stderr.strip() or error.stdout.strip() or str(error)
+        raise SystemExit(f"macOS runtime relocation failed: {detail}") from error
+
+
+def configure_host_jetstream_runtime(binary, run_tool=_run_tool, find_tool=shutil.which):
+    """Make the packaged plugin resolve Jetstream from CyberEther's app bundle.
+
+    ``@executable_path`` is CyberEther.app/Contents/MacOS for a loaded plugin,
+    where the host's ``libjetstream.dylib`` is installed. Never carry the SDK's
+    absolute build/install path into a distributable .cep.
+    """
+    otool = find_tool("otool")
+    install_name_tool = find_tool("install_name_tool")
+    if not otool or not install_name_tool:
+        raise SystemExit("macOS .cep packaging requires otool and install_name_tool")
+
+    dependencies = parse_macho_dependencies(run_tool([otool, "-L", str(binary)]))
+    jetstream = [item for item in dependencies if PurePosixPath(item).name == "libjetstream.dylib"]
+    if len(jetstream) != 1:
+        raise SystemExit("plugin must link exactly one dynamic libjetstream.dylib dependency")
+    host_install_name = "@rpath/libjetstream.dylib"
+    if jetstream[0] != host_install_name:
+        run_tool([install_name_tool, "-change", jetstream[0], host_install_name, str(binary)])
+
+    rpaths = parse_macho_rpaths(run_tool([otool, "-l", str(binary)]))
+    for path in rpaths:
+        if path not in {"@executable_path", "@loader_path"}:
+            run_tool([install_name_tool, "-delete_rpath", path, str(binary)])
+    if "@executable_path" not in rpaths:
+        run_tool([install_name_tool, "-add_rpath", "@executable_path", str(binary)])
+
+    final_dependencies = parse_macho_dependencies(run_tool([otool, "-L", str(binary)]))
+    final_jetstream = [item for item in final_dependencies if PurePosixPath(item).name == "libjetstream.dylib"]
+    final_rpaths = parse_macho_rpaths(run_tool([otool, "-l", str(binary)]))
+    if final_jetstream != [host_install_name] or "@executable_path" not in final_rpaths:
+        raise SystemExit("packaged plugin does not resolve Jetstream through the CyberEther host app")
+    if any(path not in {"@executable_path", "@loader_path"} for path in final_rpaths):
+        raise SystemExit("packaged plugin retains a non-portable Mach-O runpath")
+    allowed_dependency_prefixes = ("@rpath/", "@loader_path/", "@executable_path/", "/usr/lib/", "/System/Library/")
+    unexpected = [
+        path for path in final_dependencies
+        if not path.startswith(allowed_dependency_prefixes)
+    ]
+    if unexpected:
+        raise SystemExit("packaged plugin retains non-system absolute dependencies: " + ", ".join(unexpected))
+
+
+def package_bundle(output, manifest, binary, target_path, example_paths):
+    """Write a reproducible gzip-compressed USTAR .cep archive."""
+    with output.open("wb") as raw:
+        with gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+                add_bytes(archive, "manifest.yml", manifest)
+                add_file(archive, binary, target_path)
+                for source, name in example_paths:
+                    add_file(archive, source, name)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
@@ -96,18 +189,20 @@ def main():
     manifest = ("\n".join(lines) + "\n").encode()
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=output.parent, delete=False) as temporary:
-        temporary_path = Path(temporary.name)
-    try:
-        with tarfile.open(temporary_path, "w:gz", format=tarfile.USTAR_FORMAT) as archive:
-            add_bytes(archive, "manifest.yml", manifest)
-            add_file(archive, binary, target_path)
-            for source, name in example_paths:
-                add_file(archive, source, name)
-        temporary_path.replace(output)
-    finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
+    with tempfile.TemporaryDirectory(dir=output.parent, prefix="cep-package-") as staging:
+        staged_binary = Path(staging) / binary.name
+        shutil.copy2(binary, staged_binary)
+        if args.target["system"] == "macos":
+            configure_host_jetstream_runtime(staged_binary)
+
+        with tempfile.NamedTemporaryFile(dir=output.parent, delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+        try:
+            package_bundle(temporary_path, manifest, staged_binary, target_path, example_paths)
+            temporary_path.replace(output)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
 
 
 if __name__ == "__main__":
