@@ -16,7 +16,7 @@
 Build against the CyberEther 1.15.0 development SDK on macOS arm64. Set `PKG_CONFIG_PATH` to that SDK's `lib/pkgconfig` directory:
 
 ```sh
-PKG_CONFIG_PATH=/path/to/cyberether-1.15/lib/pkgconfig meson setup build project
+PKG_CONFIG_PATH=/path/to/cyberether-1.15/lib/pkgconfig meson setup build .
 meson compile -C build cyberether_tci_iq_source_cep
 ```
 
