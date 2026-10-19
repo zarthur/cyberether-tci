@@ -68,6 +68,10 @@ class TciClient {
     std::condition_variable wake_;
     mutable std::condition_variable stateChanged_;
     StreamMetadata metadata_;
+    // Set only after this session's explicit iq_start command was sent. Some
+    // AetherSDR versions stream IQ without echoing iq_start; a validated frame
+    // may confirm the subscription only while this request is outstanding.
+    bool iqStartRequested_ = false;
 };
 
 }  // namespace cyberether_tci

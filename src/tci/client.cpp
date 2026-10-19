@@ -330,6 +330,7 @@ void TciClient::clearSession() noexcept {
         metadata_.ready = false;
         metadata_.iqStarted = false;
         metadata_.connected = false;
+        iqStartRequested_ = false;
         ++metadata_.epoch;
         if (metadata_.epoch == 0) ++metadata_.epoch;
         queue_.clear();
@@ -376,6 +377,12 @@ bool TciClient::runConnection() {
                    sendMaskedFrame(fd, WsOpcode::Text, std::as_bytes(std::span(start.data(), start.size())));
         }
         if (!sent) break;
+        {
+            std::lock_guard stateLock(stateMutex_);
+            // readWebSocketMessage runs only after this point, so no reply can
+            // be mistaken for a subscription requested by an earlier session.
+            iqStartRequested_ = true;
+        }
 
         ControlParser parser;
         while (!stopping_.load()) {
@@ -406,10 +413,16 @@ bool TciClient::runConnection() {
                                 break;
                             case ControlUpdate::Kind::SampleRateHz: metadata_.sampleRateHz = update.value; break;
                             case ControlUpdate::Kind::IqStarted:
-                                if (update.receiver == config_.receiver) metadata_.iqStarted = true;
+                                if (update.receiver == config_.receiver && iqStartRequested_) {
+                                    metadata_.iqStarted = true;
+                                }
                                 break;
                             case ControlUpdate::Kind::IqStopped:
                                 if (update.receiver == config_.receiver) {
+                                    // A stop response/refusal closes this
+                                    // subscription. Delayed binary frames must
+                                    // not re-arm it without a new start request.
+                                    iqStartRequested_ = false;
                                     metadata_.iqStarted = false;
                                     queue_.clear();
                                 }
@@ -429,8 +442,13 @@ bool TciClient::runConnection() {
                 if (!frame) continue;
                 {
                     std::lock_guard stateLock(stateMutex_);
-                    if (!metadata_.ready || !metadata_.iqStarted ||
+                    if (!metadata_.connected || !iqStartRequested_ || !metadata_.ready ||
+                        metadata_.sampleRateHz == 0 || metadata_.panCenterHz == 0 ||
                         frame->sampleRateHz != metadata_.sampleRateHz) continue;
+                    // iq_start acknowledgements are optional in AetherSDR
+                    // 26.9.1. A valid, receiver-matched frame in the current
+                    // confirmed metadata epoch is the fallback confirmation.
+                    metadata_.iqStarted = true;
                     queue_.push(*frame);
                 }
                 stateChanged_.notify_all();

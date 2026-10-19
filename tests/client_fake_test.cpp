@@ -3,17 +3,24 @@
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <string>
 #include <thread>
 
 using namespace cyberether_tci;
 
 int main(int argc, char** argv) {
-    if (argc != 4) return 2;
+    if (argc != 5) return 2;
     const auto port = static_cast<std::uint16_t>(std::strtoul(argv[1], nullptr, 10));
     const auto requestedRate = static_cast<std::uint32_t>(std::strtoul(argv[2], nullptr, 10));
     const auto changedRate = static_cast<std::uint32_t>(std::strtoul(argv[3], nullptr, 10));
     if (!isFlex6400IqRate(requestedRate) || !isFlex6400IqRate(changedRate)) return 3;
+    const std::filesystem::path markerDir(argv[4]);
+    const auto releaseFixture = [&markerDir](const char* stage) {
+        std::ofstream(markerDir / stage) << "ready\n";
+    };
 
     ClientConfig hostnameConfig;
     hostnameConfig.host = "localhost";
@@ -33,49 +40,84 @@ int main(int argc, char** argv) {
 
     const auto waitForMetadata = [&](std::uint32_t rate, std::uint32_t center,
                                      std::chrono::milliseconds timeout,
-                                     StreamMetadata& metadata) {
+                                     StreamMetadata& metadata, bool requireIqStarted) {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
             metadata = client.metadata();
-            if (metadata.connected && metadata.ready && metadata.iqStarted &&
+            if (metadata.connected && metadata.ready &&
+                (!requireIqStarted || metadata.iqStarted) &&
                 metadata.sampleRateHz == rate && metadata.panCenterHz == center) return true;
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
         metadata = client.metadata();
-        return metadata.connected && metadata.ready && metadata.iqStarted &&
+        return metadata.connected && metadata.ready &&
+               (!requireIqStarted || metadata.iqStarted) &&
                metadata.sampleRateHz == rate && metadata.panCenterHz == center;
     };
 
     StreamMetadata initial{};
-    if (!waitForMetadata(requestedRate, 14074000, std::chrono::seconds(2), initial)) {
+    // The first connection intentionally has valid readiness/rate/center
+    // metadata but no iq_start echo. Binary IQ alone may confirm streaming,
+    // but only after our explicit start request and a valid matching frame.
+    if (!waitForMetadata(requestedRate, 14074000, std::chrono::seconds(2), initial, false) ||
+        initial.iqStarted) {
         client.stop();
         return 6;
     }
+    std::array<std::complex<float>, 1> rejectedSample;
+    rejectedSample.fill({-9.0f, -9.0f});
+    if (client.waitForSamples(1, std::chrono::milliseconds(100))) {
+        client.stop();
+        return 7; // pre-ready/wrong-receiver/wrong-rate/malformed frames are not IQ
+    }
+    const auto rejectedRead = client.popWithMetadata(rejectedSample);
+    if (rejectedRead.samplesCopied != 0 ||
+        rejectedSample[0] != std::complex<float>(-9.0f, -9.0f)) {
+        client.stop();
+        return 8;
+    }
+    releaseFixture("activate");
+    if (!waitForMetadata(requestedRate, 14074000, std::chrono::seconds(2), initial, true) ||
+        !client.waitForSamples(2, std::chrono::seconds(2))) {
+        client.stop();
+        return 9;
+    }
+    std::array<std::complex<float>, 2> initialSamples{};
+    const auto initialRead = client.popWithMetadata(initialSamples);
+    if (initialRead.samplesCopied != initialSamples.size() ||
+        initialRead.metadata.epoch != initial.epoch ||
+        initialSamples[0] != std::complex<float>(-0.75f, 0.75f) ||
+        initialSamples[1] != std::complex<float>(0.25f, -0.5f)) {
+        client.stop();
+        return 10;
+    }
+    releaseFixture("initial-read");
 
     StreamMetadata changed{};
-    if (!waitForMetadata(changedRate, 14075000, std::chrono::seconds(2), changed) ||
+    if (!waitForMetadata(changedRate, 14075000, std::chrono::seconds(2), changed, true) ||
         changed.epoch <= initial.epoch) {
         client.stop();
-        return 7;
+        return 11;
     }
 
     std::array<std::complex<float>, 3> samples;
     samples.fill({-9.0f, -9.0f});
     if (client.waitForSamples(samples.size(), std::chrono::milliseconds(100))) {
         client.stop();
-        return 8; // fake server has sent only two samples in the new epoch
+        return 12; // fake server has sent only two samples in the new epoch
     }
     auto partial = client.popWithMetadata(samples);
     if (partial.samplesCopied != 0 || partial.metadata.epoch != changed.epoch ||
         samples[0] != std::complex<float>(-9.0f, -9.0f) ||
         samples[2] != std::complex<float>(-9.0f, -9.0f)) {
         client.stop();
-        return 9;
+        return 13;
     }
+    releaseFixture("partial-read");
 
     if (!client.waitForSamples(samples.size(), std::chrono::seconds(2))) {
         client.stop();
-        return 10;
+        return 14;
     }
     const auto changedRead = client.popWithMetadata(samples);
     if (changedRead.samplesCopied != samples.size() ||
@@ -86,15 +128,34 @@ int main(int argc, char** argv) {
         samples[1] != std::complex<float>(0.5f, 0.125f) ||
         samples[2] != std::complex<float>(-0.25f, 0.75f)) {
         client.stop();
-        return 11;
+        return 15;
     }
+    releaseFixture("check-stop");
+
+    const auto stoppedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    StreamMetadata stopped{};
+    while (std::chrono::steady_clock::now() < stoppedDeadline) {
+        stopped = client.metadata();
+        if (stopped.connected && stopped.ready && !stopped.iqStarted &&
+            stopped.sampleRateHz == changedRate && stopped.panCenterHz == 14075000) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    rejectedSample.fill({-9.0f, -9.0f});
+    const auto staleRead = client.popWithMetadata(rejectedSample);
+    if (!stopped.connected || stopped.iqStarted || staleRead.samplesCopied != 0 ||
+        client.waitForSamples(1, std::chrono::milliseconds(100)) ||
+        rejectedSample[0] != std::complex<float>(-9.0f, -9.0f)) {
+        client.stop();
+        return 16; // a frame after iq_stop must not re-arm this subscription
+    }
+    releaseFixture("stop-checked");
 
     StreamMetadata reconnected{};
-    if (!waitForMetadata(requestedRate, 14076000, std::chrono::seconds(3), reconnected) ||
+    if (!waitForMetadata(requestedRate, 14076000, std::chrono::seconds(3), reconnected, true) ||
         reconnected.epoch <= changedRead.metadata.epoch ||
         !client.waitForSamples(samples.size(), std::chrono::seconds(2))) {
         client.stop();
-        return 12;
+        return 17;
     }
     const auto reconnectRead = client.popWithMetadata(samples);
     client.stop();
@@ -104,9 +165,9 @@ int main(int argc, char** argv) {
         reconnectRead.metadata.epoch != reconnected.epoch ||
         samples[0] != std::complex<float>(-0.5f, 0.5f) ||
         samples[1] != std::complex<float>(0.75f, -0.75f) ||
-        samples[2] != std::complex<float>(0.125f, -0.125f)) return 13;
+        samples[2] != std::complex<float>(0.125f, -0.125f)) return 18;
 
-    std::cout << "fake TCI lifecycle and metadata-epoch checks passed at "
+    std::cout << "fake TCI no-echo activation, negative/stale-frame, lifecycle, and metadata-epoch checks passed at "
               << requestedRate << " -> " << changedRate << " samples/s\n";
     return 0;
 }
