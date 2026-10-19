@@ -39,6 +39,8 @@ target_include_directories(tci_iq_block_contract_test PRIVATE tests/fake_jetstre
 add_test(NAME tci_iq_block_contract COMMAND tci_iq_block_contract_test)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME tci_iq_cep_packaging
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/package_cep_test.py)
 add_executable(tci_iq_client_test tests/client_fake_test.cpp)
 target_link_libraries(tci_iq_client_test PRIVATE tci_iq_protocol)
 add_test(NAME tci_iq_websocket_fake_server

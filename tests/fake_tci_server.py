@@ -132,7 +132,9 @@ def run_scenario(executable, requested_rate, changed_rate):
                             send_frame(conn, 2, bytes(64))
                             send_frame(conn, 1, b"iq_start:1;")
                             wait_for_marker(marker_dir, "activate")
-                            send_iq(conn, requested_rate, [(-0.75, 0.75), (0.25, -0.5)])
+                            send_iq(conn, requested_rate, [
+                                (-0.75, 0.75), (0.25, -0.5), (-0.625, -0.125)
+                            ])  # third sample remains queued in the old epoch
                             wait_for_marker(marker_dir, "initial-read")
 
                             send_frame(conn, 1, (
