@@ -1,16 +1,19 @@
 #include "cyberether_tci/client.hpp"
+#include "socket_io.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cctype>
 #include <cstring>
+#include <fcntl.h>
+#include <poll.h>
 #include <random>
 #include <string>
 #include <vector>
 
-#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -21,6 +24,8 @@ namespace {
 constexpr std::string_view kWebSocketGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 constexpr std::size_t kMaxHttpResponse = 16384;
 constexpr std::size_t kMaxWebSocketMessage = kMaxIqFrameBytes + kTciAudioHeaderBytes;
+constexpr auto kConnectTimeout = std::chrono::seconds(3);
+constexpr auto kConnectPollInterval = std::chrono::milliseconds(50);
 
 enum class WsOpcode : std::uint8_t { Continuation = 0, Text = 1, Binary = 2, Close = 8, Ping = 9, Pong = 10 };
 
@@ -88,7 +93,7 @@ std::string base64(std::span<const std::byte> data) {
 bool sendAll(int fd, std::span<const std::byte> bytes) {
     std::size_t sent = 0;
     while (sent < bytes.size()) {
-        const auto rc = ::send(fd, bytes.data() + sent, bytes.size() - sent, 0);
+        const auto rc = detail::sendWithoutSigPipe(fd, bytes.data() + sent, bytes.size() - sent);
         if (rc <= 0) return false;
         sent += static_cast<std::size_t>(rc);
     }
@@ -105,28 +110,76 @@ bool recvExact(int fd, std::span<std::byte> bytes) {
     return true;
 }
 
-int connectTcp(const ClientConfig& config) {
-    if (config.host.empty() || config.host.find_first_of("\r\n") != std::string::npos ||
-        config.host.find('\0') != std::string::npos) return -1;
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo* addresses = nullptr;
-    const auto service = std::to_string(config.port);
-    if (::getaddrinfo(config.host.c_str(), service.c_str(), &hints, &addresses) != 0) return -1;
-    int fd = -1;
-    for (auto* address = addresses; address != nullptr; address = address->ai_next) {
-        fd = ::socket(address->ai_family, address->ai_socktype, address->ai_protocol);
-        if (fd < 0) continue;
-        if (::connect(fd, address->ai_addr, address->ai_addrlen) == 0) break;
+int connectTcp(const ClientConfig& config, const std::atomic<bool>& stopping) {
+    // Initial support deliberately avoids DNS: AetherSDR runs on this Mac and
+    // the TCI listener is unauthenticated, so only an IPv4 loopback literal is
+    // accepted. This also bounds cancellation during endpoint resolution.
+    if (config.host != "127.0.0.1" || config.port == 0 || stopping.load()) {
+        return -1;
+    }
+
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    if (!detail::configureSocketForSend(fd)) {
         ::close(fd);
-        fd = -1;
+        return -1;
     }
-    ::freeaddrinfo(addresses);
-    if (fd >= 0) {
-        timeval timeout{3, 0};
-        ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    const int originalFlags = ::fcntl(fd, F_GETFL, 0);
+    if (originalFlags < 0 || ::fcntl(fd, F_SETFL, originalFlags | O_NONBLOCK) != 0) {
+        ::close(fd);
+        return -1;
     }
+
+    sockaddr_in endpoint{};
+    endpoint.sin_family = AF_INET;
+    endpoint.sin_port = htons(config.port);
+    endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    const int connectResult = ::connect(fd, reinterpret_cast<const sockaddr*>(&endpoint), sizeof(endpoint));
+    if (connectResult != 0 && errno != EINPROGRESS) {
+        ::close(fd);
+        return -1;
+    }
+
+    if (connectResult != 0) {
+        const auto deadline = std::chrono::steady_clock::now() + kConnectTimeout;
+        bool connected = false;
+        while (!stopping.load() && std::chrono::steady_clock::now() < deadline) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+            const auto pollFor = std::min(kConnectPollInterval, remaining);
+            pollfd descriptor{fd, POLLOUT, 0};
+            const int pollResult = ::poll(&descriptor, 1, static_cast<int>(pollFor.count()));
+            if (pollResult < 0 && errno == EINTR) continue;
+            if (pollResult < 0) {
+                ::close(fd);
+                return -1;
+            }
+            if (pollResult == 0) continue;
+            int socketError = 0;
+            socklen_t errorLength = sizeof(socketError);
+            if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &errorLength) != 0 || socketError != 0) {
+                ::close(fd);
+                return -1;
+            }
+            connected = true;
+            break;
+        }
+        if (!connected || stopping.load()) {
+            ::close(fd);
+            return -1;
+        }
+    }
+    if (stopping.load()) {
+        ::close(fd);
+        return -1;
+    }
+    if (::fcntl(fd, F_SETFL, originalFlags) != 0) {
+        ::close(fd);
+        return -1;
+    }
+    timeval timeout{3, 0};
+    (void)::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     return fd;
 }
 
@@ -222,7 +275,8 @@ bool readWebSocketMessage(int fd, WsMessage& message) {
 TciClient::~TciClient() { stop(); }
 
 bool TciClient::start(ClientConfig config) {
-    if (worker_.joinable() || config.receiver > 3 || !isFlex6400IqRate(config.requestedRateHz) || config.queueCapacity == 0) return false;
+    if (worker_.joinable() || config.host != "127.0.0.1" || config.receiver > 3 ||
+        !isFlex6400IqRate(config.requestedRateHz) || config.queueCapacity == 0) return false;
     config_ = std::move(config);
     queue_ = BoundedIqQueue(config_.queueCapacity);
     stopping_.store(false);
@@ -232,15 +286,21 @@ bool TciClient::start(ClientConfig config) {
 
 void TciClient::stop() noexcept {
     stopping_.store(true);
+    stateChanged_.notify_all();
     {
         std::lock_guard sendLock(sendMutex_);
         const auto fd = socketFd_.load();
         if (fd >= 0) {
-        if (connected_.load()) {
-            const auto stop = "iq_stop:" + std::to_string(config_.receiver) + ";";
-            (void)sendMaskedFrame(fd, WsOpcode::Text, std::as_bytes(std::span(stop.data(), stop.size())));
-        }
-        ::shutdown(fd, SHUT_RDWR);
+            bool connected = false;
+            {
+                std::lock_guard stateLock(stateMutex_);
+                connected = metadata_.connected;
+            }
+            if (connected) {
+                const auto command = "iq_stop:" + std::to_string(config_.receiver) + ";";
+                (void)sendMaskedFrame(fd, WsOpcode::Text, std::as_bytes(std::span(command.data(), command.size())));
+            }
+            (void)::shutdown(fd, SHUT_RDWR);
         }
     }
     wake_.notify_all();
@@ -248,23 +308,44 @@ void TciClient::stop() noexcept {
     clearSession();
 }
 
-std::size_t TciClient::pop(std::span<std::complex<float>> output) noexcept {
-    std::lock_guard lock(queueMutex_);
-    return queue_.pop(output);
+bool TciClient::waitForSamples(std::size_t required, std::chrono::milliseconds timeout) const noexcept {
+    std::unique_lock lock(stateMutex_);
+    const bool ready = stateChanged_.wait_for(lock, timeout, [this, required] {
+        return stopping_.load() ||
+               (metadata_.connected && metadata_.ready && metadata_.iqStarted && queue_.size() >= required);
+    });
+    return ready && !stopping_.load() && metadata_.connected && metadata_.ready &&
+           metadata_.iqStarted && queue_.size() >= required;
+}
+
+StreamReadResult TciClient::popWithMetadata(std::span<std::complex<float>> output) noexcept {
+    std::lock_guard lock(stateMutex_);
+    StreamReadResult result{metadata_, 0};
+    if (!metadata_.connected || !metadata_.ready || !metadata_.iqStarted || queue_.size() < output.size()) {
+        return result;
+    }
+    result.samplesCopied = queue_.pop(output);
+    return result;
 }
 
 StreamMetadata TciClient::metadata() const noexcept {
-    return {sampleRateHz_.load(), panCenterHz_.load(), ready_.load(), iqStarted_.load(), connected_.load()};
+    std::lock_guard lock(stateMutex_);
+    return metadata_;
 }
 
 void TciClient::clearSession() noexcept {
-    sampleRateHz_.store(0);
-    panCenterHz_.store(0);
-    ready_.store(false);
-    iqStarted_.store(false);
-    connected_.store(false);
-    std::lock_guard lock(queueMutex_);
-    queue_.clear();
+    {
+        std::lock_guard lock(stateMutex_);
+        metadata_.sampleRateHz = 0;
+        metadata_.panCenterHz = 0;
+        metadata_.ready = false;
+        metadata_.iqStarted = false;
+        metadata_.connected = false;
+        ++metadata_.epoch;
+        if (metadata_.epoch == 0) ++metadata_.epoch;
+        queue_.clear();
+    }
+    stateChanged_.notify_all();
 }
 
 void TciClient::run() {
@@ -280,7 +361,7 @@ void TciClient::run() {
 }
 
 bool TciClient::runConnection() {
-    const auto fd = connectTcp(config_);
+    const auto fd = connectTcp(config_, stopping_);
     if (fd < 0) return false;
     socketFd_.store(fd);
     const auto closeSocket = [this, fd] {
@@ -292,7 +373,11 @@ bool TciClient::runConnection() {
     bool success = false;
     do {
         if (stopping_.load() || !websocketHandshake(fd, config_)) break;
-        connected_.store(true);
+        {
+            std::lock_guard stateLock(stateMutex_);
+            metadata_.connected = true;
+        }
+        stateChanged_.notify_all();
         const auto rate = "iq_samplerate:" + std::to_string(config_.requestedRateHz) + ";";
         const auto start = "iq_start:" + std::to_string(config_.receiver) + ";";
         bool sent = false;
@@ -319,26 +404,47 @@ bool TciClient::runConnection() {
                 const std::string_view text(reinterpret_cast<const char*>(message.payload.data()), message.payload.size());
                 std::vector<ControlUpdate> updates;
                 if (!parser.append(text, updates)) break;
-                for (const auto& update : updates) {
-                    switch (update.kind) {
-                        case ControlUpdate::Kind::Ready: ready_.store(true); break;
-                        case ControlUpdate::Kind::PanCenterHz:
-                            if (update.receiver == config_.receiver) panCenterHz_.store(update.value);
-                            break;
-                        case ControlUpdate::Kind::SampleRateHz: sampleRateHz_.store(update.value); break;
-                        case ControlUpdate::Kind::IqStarted:
-                            if (update.receiver == config_.receiver) iqStarted_.store(true);
-                            break;
-                        case ControlUpdate::Kind::IqStopped:
-                            if (update.receiver == config_.receiver) iqStarted_.store(false);
-                            break;
+                bool changed = false;
+                {
+                    std::lock_guard stateLock(stateMutex_);
+                    const auto previousRate = metadata_.sampleRateHz;
+                    const auto previousCenter = metadata_.panCenterHz;
+                    for (const auto& update : updates) {
+                        switch (update.kind) {
+                            case ControlUpdate::Kind::Ready: metadata_.ready = true; break;
+                            case ControlUpdate::Kind::PanCenterHz:
+                                if (update.receiver == config_.receiver) metadata_.panCenterHz = update.value;
+                                break;
+                            case ControlUpdate::Kind::SampleRateHz: metadata_.sampleRateHz = update.value; break;
+                            case ControlUpdate::Kind::IqStarted:
+                                if (update.receiver == config_.receiver) metadata_.iqStarted = true;
+                                break;
+                            case ControlUpdate::Kind::IqStopped:
+                                if (update.receiver == config_.receiver) {
+                                    metadata_.iqStarted = false;
+                                    queue_.clear();
+                                }
+                                break;
+                        }
+                    }
+                    changed = previousRate != metadata_.sampleRateHz || previousCenter != metadata_.panCenterHz;
+                    if (changed) {
+                        ++metadata_.epoch;
+                        if (metadata_.epoch == 0) ++metadata_.epoch;
+                        queue_.clear();
                     }
                 }
+                stateChanged_.notify_all();
             } else if (message.opcode == WsOpcode::Binary) {
                 const auto frame = parseIqFrame(message.payload, config_.receiver);
-                if (!frame || frame->sampleRateHz != sampleRateHz_.load()) continue;
-                std::lock_guard lock(queueMutex_);
-                queue_.push(*frame);
+                if (!frame) continue;
+                {
+                    std::lock_guard stateLock(stateMutex_);
+                    if (!metadata_.ready || !metadata_.iqStarted ||
+                        frame->sampleRateHz != metadata_.sampleRateHz) continue;
+                    queue_.push(*frame);
+                }
+                stateChanged_.notify_all();
             }
         }
         success = true;

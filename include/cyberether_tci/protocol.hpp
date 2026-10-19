@@ -49,8 +49,8 @@ std::optional<IqFrame> parseIqFrame(std::span<const std::byte> bytes,
 bool isFlex6400IqRate(std::uint32_t rateHz) noexcept;
 
 // Fixed-capacity producer/consumer queue. Overflow discards the oldest IQ so
-// processing stays close to live time; pop zero-fills shortages and reports
-// how many real samples were copied.
+// processing stays close to live time. pop is all-or-nothing: callers never
+// receive zero-filled shortages as if they were radio samples.
 class BoundedIqQueue {
   public:
     explicit BoundedIqQueue(std::size_t capacity);

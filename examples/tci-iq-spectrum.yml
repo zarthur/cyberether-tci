@@ -20,21 +20,6 @@ graph:
         y: 220
         width: 320
         height: 0
-  - name: throttle
-    module: throttle
-    device: cpu
-    runtime: native
-    provider: generic
-    config:
-      intervalMs: 43
-    input:
-      buffer: '${graph.tci_iq_source.output.signal}'
-    meta:
-      node:
-        x: 700
-        y: 220
-        width: 140
-        height: 0
   - name: spectrum_analyzer
     module: spectrum_analyzer
     device: cpu
@@ -53,10 +38,10 @@ graph:
       amplitudeLabel: Amplitude (dBFS)
       waterfallLabel: Time
     input:
-      buffer: '${graph.throttle.output.buffer}'
+      buffer: '${graph.tci_iq_source.output.signal}'
     meta:
       node:
-        x: 820
+        x: 700
         y: 220
         width: 608
         height: 672
