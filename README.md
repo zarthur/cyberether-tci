@@ -1,6 +1,6 @@
 # CyberEther TCI IQ Source
 
-**Status: prototype; synthetic tests, CyberEther 1.15.0 plugin loading, and a live receive-only spectrum/waterfall check have passed.** The CyberEther plugin ABI is experimental. This source is for AetherSDR TCI IQ from a FLEX-6400 on macOS Apple Silicon; it does not transmit, key PTT, or tune the radio.
+**Status: prototype; synthetic CI, CyberEther 1.15.0 plugin loading, and one live receive-only check at 48 kS/s have passed. Full hardware qualification is still incomplete: 24/96 kS/s, live rate/center transitions, and other platform/version combinations have not been qualified.** The CyberEther plugin ABI is experimental. This source is for AetherSDR TCI IQ from a FLEX-6400 on macOS Apple Silicon; it does not transmit, key PTT, or tune the radio.
 
 ## Scope and behavior
 
@@ -10,6 +10,24 @@
 - Parses AetherSDR's 64-byte TCI IQ header and interleaved little-endian float32 I/Q. It validates receiver, negotiated rate, format, codec, CRC field, type, channel count, scalar count, reserved words, frame length, and finite samples before producing CF32.
 - Uses a bounded queue, drops oldest data on overflow, waits for complete output buffers, clears samples across metadata epochs/disconnects, and reconnects with backoff.
 - `examples/tci-iq-spectrum.yml` connects the source to CyberEther's spectrum analyzer and waterfall.
+
+## Confirmed TCI IQ frame layout
+
+AetherSDR sends IQ in a 64-byte header followed by interleaved little-endian float32 I/Q. The header is sixteen little-endian 32-bit words:
+
+| Byte offset | Field | Accepted value or meaning |
+|---:|---|---|
+| 0 | Receiver | Receiver index 0–3; must match the subscription |
+| 4 | Sample rate | Actual rate in Hz; 24,000, 48,000, or 96,000 |
+| 8 | Sample format | 3 (float32) |
+| 12 | Codec | 0 |
+| 16 | CRC | 0 |
+| 20 | Scalar count | Number of float32 values in the payload; must be positive and even |
+| 24 | Frame type | 0 |
+| 28 | Channels | 2 (I and Q) |
+| 32–60 | Reserved | Eight words, all zero |
+
+Each payload sample is an I float32 followed by a Q float32. The parser rejects frames that do not match these fields, lengths, or finite-value checks. Field definitions are based on the [AetherSDR IQ header](https://github.com/aethersdr/AetherSDR/blob/main/src/core/TciAudioHeader.h) and its TCI server implementation.
 
 ## Build and package
 
@@ -26,20 +44,31 @@ The `.cep` packager stages a copy of the plugin, rewrites the SDK's `libjetstrea
 
 1. Copy `build/cyberether_tci_iq_source.cep` to `~/Documents/CyberEtherPlugins/cyberether_tci_iq_source.cep`, replacing an older copy if present, then restart CyberEther 1.15.0 so its plugin registry discovers the source block.
 2. In AetherSDR, enable its TCI server yourself and confirm its network exposure is acceptable. The source defaults to `127.0.0.1:50001`, receiver 0, and 48 kS/s. Keep tuning in AetherSDR.
-3. In CyberEther, choose **Examples** from the home screen and open **AetherSDR TCI IQ Spectrum**. The example starts the flowgraph and displays the spectrum and waterfall when the TCI stream is available.
+3. In CyberEther, choose **Examples** from the home screen and open **AetherSDR TCI IQ Spectrum**. The example starts the flowgraph and displays the spectrum and waterfall when the TCI stream is available. **Qualification status:** this example has only been checked at 48 kS/s; 24/96 kS/s and live rate/center-transition qualification remain outstanding.
 4. Stop the flowgraph with its stop control or close the flowgraph. If prompted to save the example, choose **Don't Save**. Closing the graph sends `iq_stop`; reopening it starts a new IQ subscription.
+
+## Manual hardware qualification
+
+This checklist is manual and is not part of default CI. It is still outstanding beyond the 48 kS/s check recorded below.
+
+- Record CyberEther, AetherSDR, macOS, and radio versions; use a FLEX-6400 and a known AetherSDR panadapter.
+- Test 24, 48, and 96 kS/s separately. Confirm the server-reported rate and `dds` center, and verify that the example renders receive IQ at each rate.
+- Change the panadapter center and requested IQ rate in AetherSDR, then verify that the plugin follows the reported metadata without issuing tuning commands.
+- Exercise a controlled TCI disconnect and reconnect, then close the graph and confirm that the client disconnects.
+- Keep results to environment details and observations; do not capture or publish private IQ data. The plugin sends no TX/PTT/tune commands.
 
 ## Verification
 
 - The Release CMake suite covers protocol parsing, synthetic fixtures, bounded buffering, cancellation/deadlines, block configuration, and loopback disconnect/reconnect. Packaging tests check host-library relocation and byte-identical archive output for identical inputs.
 - The macOS arm64 `.cep` was built against the isolated CyberEther 1.15.0 SDK, loaded by the real plugin loader, and registered the `tci_iq_source` module. The normal CyberEther 1.15.0 app displayed the example's spectrum/waterfall while receiving AetherSDR TCI IQ from the connected FLEX-6400 at 48 kS/s and a 14.074 MHz pan center. Aether's diagnostic log showed DAX IQ stream allocation/removal, `iq_stop`, zero remaining TCI clients, and PTT false.
+- After a normal restart of CyberEther 1.15.0, the Examples panel listed **AetherSDR TCI IQ Spectrum**. Opening it loaded the `tci_iq_source` and `spectrum_analyzer` blocks and displayed a live spectrum and waterfall at the default 48 kS/s. The localhost TCI connection was present while the graph ran; closing the test graph returned to the home screen and removed the established connection. This verifies one 48 kS/s receive path, not all hardware qualification criteria.
 - Reconciled Aether log timing: the long visual session began with DAX IQ creation at 11:57:10.643 and disconnected at 12:23:15.131 with `connectionAgeMs=1564531`, `lastRxCommand=iq_stop`, and PTT false. A reconnect at 12:23:17.740 ended at 12:23:27.041 after 9,334 ms, also with `iq_stop`, zero clients, and PTT false. These records confirm that the long session was live Aether TCI/DAX, not a loopback fixture.
 - A later bounded visual run began at 12:59:46.200 and disconnected at 13:00:05.504 (`connectionAgeMs=19336`). The server recorded `lastRxCommand=iq_stop`, removed DAX stream `0x20000000`, reported zero TCI clients, and reported PTT false. An independent 180-second watchdog started at 12:59:32; it observed the stop marker at 13:01:38 and exited without signaling CyberEther. Afterward, `lsof` showed the Aether listener still present and no established client connections.
 - The graph was closed after qualification. The TCI server remains enabled at the owner's request; no firewall settings were changed. No tune or PTT command was sent by the plugin.
 
 ## TCI server exposure
 
-AetherSDR's TCI server listens on all network interfaces without a password. A client connecting to localhost does not restrict other machines that can reach the server. The server supports radio-control commands, including tune and PTT, even though this plugin's own command allowlist is receive-only. Review exposure before enabling the server. This project does not enable TCI or change firewall settings.
+AetherSDR's TCI server listens on all network interfaces without a password. A client connecting to localhost does not restrict other machines that can reach the server. The server supports radio-control commands, including tune and PTT, even though this plugin's own command allowlist is receive-only. Keep the server disabled when it is not needed; if it is enabled, restrict port 50001 reachability to trusted clients with host or network controls. AetherSDR's **Settings → Autostart TCI with AetherSDR** starts the server on every radio connection, so leave that option off when you only need per-use access. See the [AetherSDR TCI server setup and known issues](https://docs.aethersdr.com/tci-server). This project does not enable TCI or change firewall settings.
 
 ## References
 
