@@ -10,8 +10,11 @@ namespace Jetstream::Modules {
 
 Result TciIqSourceImpl::validate() {
     const auto& config = *candidate();
-    if (config.host.empty() || config.host.find_first_of("\r\n") != std::string::npos ||
-        config.port == 0 || config.port > 65535 || config.receiver > 3 ||
+    if (config.host != "127.0.0.1") {
+        JST_ERROR("[TCI_IQ_SOURCE] Only the literal loopback host 127.0.0.1 is supported.");
+        return Result::ERROR;
+    }
+    if (config.port == 0 || config.port > 65535 || config.receiver > 3 ||
         !cyberether_tci::isFlex6400IqRate(config.sampleRateHz) ||
         config.bufferSize < 256 || config.bufferSize > 65536) {
         JST_ERROR("[TCI_IQ_SOURCE] Invalid endpoint, receiver, sample rate, or buffer size.");

@@ -3,6 +3,7 @@
 #include "cyberether_tci/protocol.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -13,6 +14,8 @@
 namespace cyberether_tci {
 
 struct ClientConfig {
+    // The initial implementation only accepts this literal IPv4 loopback host;
+    // hostnames and remote endpoints are intentionally rejected.
     std::string host = "127.0.0.1";
     std::uint16_t port = 50001;
     std::uint32_t receiver = 0;
@@ -23,9 +26,15 @@ struct ClientConfig {
 struct StreamMetadata {
     std::uint32_t sampleRateHz = 0;
     std::uint32_t panCenterHz = 0;
+    std::uint64_t epoch = 0;
     bool ready = false;
     bool iqStarted = false;
     bool connected = false;
+};
+
+struct StreamReadResult {
+    StreamMetadata metadata;
+    std::size_t samplesCopied = 0;
 };
 
 // Minimal ws:// TCI IQ client. Its only outbound protocol records are
@@ -39,7 +48,8 @@ class TciClient {
 
     bool start(ClientConfig config);
     void stop() noexcept;
-    std::size_t pop(std::span<std::complex<float>> output) noexcept;
+    bool waitForSamples(std::size_t required, std::chrono::milliseconds timeout) const noexcept;
+    StreamReadResult popWithMetadata(std::span<std::complex<float>> output) noexcept;
     StreamMetadata metadata() const noexcept;
 
   private:
@@ -52,15 +62,16 @@ class TciClient {
     std::thread worker_;
     ClientConfig config_;
     mutable std::mutex sendMutex_;
-    mutable std::mutex queueMutex_;
+    mutable std::mutex stateMutex_;
     BoundedIqQueue queue_{1};
     mutable std::mutex waitMutex_;
     std::condition_variable wake_;
-    std::atomic<std::uint32_t> sampleRateHz_{0};
-    std::atomic<std::uint32_t> panCenterHz_{0};
-    std::atomic<bool> ready_{false};
-    std::atomic<bool> iqStarted_{false};
-    std::atomic<bool> connected_{false};
+    mutable std::condition_variable stateChanged_;
+    StreamMetadata metadata_;
+    // Set only after this session's explicit iq_start command was sent. Some
+    // AetherSDR versions stream IQ without echoing iq_start; a validated frame
+    // may confirm the subscription only while this request is outstanding.
+    bool iqStartRequested_ = false;
 };
 
 }  // namespace cyberether_tci

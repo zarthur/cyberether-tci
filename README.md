@@ -1,34 +1,40 @@
 # CyberEther TCI IQ Source
 
-**Status: early implementation; not yet packaged or qualified in CyberEther.** The repository now contains the receive-only WebSocket client, defensive TCI control/IQ parsing, bounded sample buffering, a CyberEther 1.15.0 plugin scaffold, synthetic fixtures, and an example spectrum flowgraph. The parser and client pass local synthetic tests. The `.cep` build and integration with CyberEther 1.15.0 remain unverified.
+**Status: prototype; synthetic checks, plugin loading, and compute-only graph execution are verified. Rendered UI and live TCI remain unverified.** The repository contains a receive-only TCI client, defensive control/IQ parsing, bounded buffering, a CyberEther source block, synthetic tests, and an example flowgraph. The macOS arm64 plugin compiles against CyberEther 1.15.0, packages as a `.cep`, and loads through the real SDK plugin loader with its source module registered. No AetherSDR server or radio was used.
 
-This plugin receives IQ from AetherSDR's TCI server while AetherSDR is connected to a FLEX-6400. It does not transmit or key PTT. The client only sends `iq_samplerate`, `iq_start`, and `iq_stop`; it has no generic TCI command sender. Tune in AetherSDR. Aether's current `dds` SET behavior must not be treated as a retune operation.
+This source is intended to receive IQ from AetherSDR's TCI server while AetherSDR is connected to a FLEX-6400. It does not transmit or key PTT. Its outbound TCI commands are limited to `iq_samplerate`, `iq_start`, and `iq_stop`; it has no generic command sender. Tune in AetherSDR. The current Aether `dds` SET behavior must not be treated as a panadapter retune.
 
-## Architecture and current scope
+## Architecture and initial scope
 
-- The source block creates a CF32 stream and connects to a `ws://` TCI endpoint (default `127.0.0.1:50001`).
-- The client requests one of the FLEX-6400 supported IQ rates: **24, 48, or 96 kS/s**. AetherSDR applies `iq_samplerate` globally to TCI IQ streams and announces the achieved rate to connected peers, so changing it can affect other TCI IQ clients. This source waits for the server's `iq_samplerate` echo and `dds:<receiver>,<pan-center-Hz>;` state before publishing actual sample-rate and pan-center metadata. It does not assume the requested rate was accepted.
-- Binary IQ frames use AetherSDR's observed 64-byte, 16-word TCI header followed by interleaved little-endian float32 I/Q values. The parser checks receiver, rate, format, codec, CRC field, type, channel count, scalar count, reserved words, exact frame length, and finite sample values before creating CF32 samples.
-- The receive queue is bounded. On overflow it drops the oldest samples; shortages are zero-filled. Disconnect clears queued data and the client reconnects with backoff. It requests the same receive-only stream after reconnect.
-- `examples/tci-iq-spectrum.yml` routes 2048 samples at the default 48 kS/s rate through a 43 ms throttle to a spectrum analyzer, keeping display updates close to real time. If changing the requested rate or block size, adjust `intervalMs` to approximately `bufferSize * 1000 / actual_sample_rate`. The frequency attribute follows Aether's actual pan center so downstream displays can place the sampled band correctly.
+- The source block targets a `ws://` endpoint at `127.0.0.1:50001` by default. The client accepts only literal IPv4 loopback `127.0.0.1`; it does not resolve hostnames or connect to remote hosts. TCP connect is nonblocking, polls cancellation every 50 ms, and has a three-second timeout.
+- The client requests one of the FLEX-6400 IQ rates: **24, 48, or 96 kS/s**. AetherSDR applies `iq_samplerate` globally to TCI IQ streams and announces the achieved rate to connected peers, so changing it may affect other TCI IQ clients. The source waits for the server's `iq_samplerate` echo and `dds:<receiver>,<pan-center-Hz>;` state before publishing actual rate and pan-center metadata; a request alone is not treated as confirmation.
+- The parser uses AetherSDR's 64-byte, 16-word TCI IQ header followed by interleaved little-endian float32 I/Q values. It validates the receiver, rate, format, codec, CRC field, type, channel count, scalar count, reserved words, exact frame length, and finite sample values before producing CF32 samples.
+- The receive queue is bounded and drops oldest samples on overflow. The source waits for a complete output buffer; a short read is not padded with zeros. A rate or pan-center update increments the metadata epoch and clears queued samples under the same lock used to pair output with metadata. Disconnect clears queued samples, and the client reconnects with backoff.
+- `examples/tci-iq-spectrum.yml` connects the source directly to a spectrum analyzer, without a fixed-rate throttle. The source is designed to pace graph computation at the confirmed server rate. The frequency attribute follows AetherSDR's reported panadapter center. A compute-only source-to-spectrum graph has been exercised through the real Jetstream API with a fake loopback server; the bundled visual analyzer flowgraph has not been rendered.
 
-The protocol implementation is isolated in `src/tci/` and can be checked without the CyberEther SDK. `CMakeLists.txt` builds the synthetic protocol and local fake-WebSocket tests. `meson.build` targets CyberEther 1.15.0 or newer, macOS arm64, and the official `.cep` manifest shape; it still needs a real 1.15.0 build/loader check.
+The plugin scaffold targets CyberEther 1.15.0 or newer, macOS arm64, and the official `.cep` manifest shape. CyberEther's plugin ABI is experimental.
 
-## Synthetic verification
+## Verification status
 
-```sh
-cmake -S . -B build
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
-```
+Synthetic checks run locally with strict-warning Clang C++20 builds and `-DNDEBUG`:
 
-These tests use synthetic binary frames and a fake WebSocket server bound to loopback. They do not connect to AetherSDR or radio hardware.
+- Protocol fixtures cover the observed IQ header, sample decoding, supported rates, metadata parsing, malformed frames, and all-or-nothing queue reads.
+- A loopback fake TCI server covers the receive-only command sequence, 24/48/96 kS/s scenarios, rate/center metadata epochs, queue clearing, full-buffer readiness, disconnect, and reconnect.
+- Dedicated checks cover a disconnected-peer send, cancellation during a stalled handshake, deterministic pending-connect deadline expiry/cancellation, and protocol test failures remaining enabled under `NDEBUG`.
+- A Release CMake build and all seven synthetic tests pass, including loopback-only fake-server and pending-connect deadline/cancellation checks. Python syntax checks also pass.
+- The plugin was compiled against the isolated CyberEther v1.15.0 SDK, packaged with its compiled macOS arm64 target, loaded by the actual CyberEther plugin loader, and verified to register the `tci_iq_source` module.
+- A compute-only host integration run loads the compiled `.cep`, creates the actual `tci_iq_source` block and built-in `spectrum_engine` block in a synchronous Jetstream flowgraph, and processes synthetic IQ from a loopback fake TCI server. It verifies the initial 24 kS/s state, transition to 48 kS/s and a new pan center, finite IQ/spectrum output, and orderly graph destruction sending `iq_stop`. This verifies DSP graph execution without a viewport; it does not render the bundled visual spectrum analyzer.
+- The block contract harness separately calls the source block's `define()` and `create()` methods against a **fake Jetstream API**. It checks configuration descriptor types and mapping.
 
-## Build and try the plugin
+No AetherSDR server or radio was used for these checks.
 
-Build against the official CyberEther 1.15.0 development dependency using Meson, then compile the `cyberether_tci_iq_source.cep` target. On this version, the plugin ABI is experimental. The package minimum is pinned to 1.15.0 and the initial target is macOS arm64.
+## Native build and use
 
-To use the example, first enable AetherSDR's TCI server yourself and confirm its listener exposure is acceptable. Then open the bundled TCI IQ Spectrum example and keep tuning in AetherSDR. This project does not enable TCI or adjust firewall/server settings. The block starts an IQ subscription, which may cause AetherSDR to allocate or bind a DAX IQ channel for the selected receiver.
+The native build was verified on macOS arm64 against an isolated build of CyberEther v1.15.0 from its official source tag. The plugin compiles and packages as `cyberether_tci_iq_source.cep`; the real CyberEther plugin loader loads it and reports the `tci_iq_source` module. A compute-only synchronous host graph was also verified through the real Jetstream API. The bundled rendered visual graph and live AetherSDR/FLEX qualification remain separate checks.
+
+To use the example after review and a real host integration check, enable AetherSDR's TCI server yourself and confirm its listener exposure is acceptable. Then open the bundled TCI IQ Spectrum example and keep tuning in AetherSDR. This project does not enable TCI or change firewall/server settings. Starting the IQ subscription may cause AetherSDR to allocate or bind a DAX IQ channel for the selected receiver.
+
+To use the example after a real build, enable AetherSDR's TCI server yourself and confirm its listener exposure is acceptable. Then open the bundled TCI IQ Spectrum example and keep tuning in AetherSDR. This project does not enable TCI or change firewall/server settings. Starting the IQ subscription may cause AetherSDR to allocate or bind a DAX IQ channel for the selected receiver.
 
 ## TCI server exposure
 

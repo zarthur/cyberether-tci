@@ -172,11 +172,11 @@ void BoundedIqQueue::push(const IqFrame& frame) {
 }
 
 std::size_t BoundedIqQueue::pop(std::span<std::complex<float>> output) noexcept {
-    const std::size_t count = std::min(size_, output.size());
+    if (output.size() > size_) return 0;
+    const std::size_t count = output.size();
     for (std::size_t i = 0; i < count; ++i) {
         output[i] = data_[(head_ + i) % data_.size()];
     }
-    std::fill(output.begin() + count, output.end(), std::complex<float>{});
     if (!data_.empty()) head_ = (head_ + count) % data_.size();
     size_ -= count;
     return count;

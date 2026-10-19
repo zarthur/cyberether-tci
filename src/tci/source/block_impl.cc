@@ -24,16 +24,21 @@ Result TciIqSourceBlockImpl::configure() {
 
 Result TciIqSourceBlockImpl::define() {
     JST_CHECK(defineInterfaceOutput("signal", "Signal", "Complex float IQ samples."));
-    JST_CHECK(defineInterfaceConfig("host", "TCI Host", "AetherSDR TCI server host.",
-                                    {{"type", "string"}}));
+    JST_CHECK(defineInterfaceConfig("host", "TCI Host", "Literal 127.0.0.1 only; hostnames and remote endpoints are not supported.",
+                                    {{"type", "text"}}));
     JST_CHECK(defineInterfaceConfig("port", "TCI Port", "AetherSDR TCI WebSocket port.",
-                                    {{"type", "integer"}, {"minimum", 1}, {"maximum", 65535}}));
+                                    {{"type", "uint"}}));
     JST_CHECK(defineInterfaceConfig("receiver", "Receiver", "TCI receiver number.",
-                                    {{"type", "integer"}, {"minimum", 0}, {"maximum", 3}}));
-    JST_CHECK(defineInterfaceConfig("sampleRateHz", "Requested IQ Rate", "AetherSDR IQ rate request.",
-                                    {{"type", "integer"}, {"enum", {24000, 48000, 96000}}}));
+                                    {{"type", "uint"}}));
+    JST_CHECK(defineInterfaceConfig(
+        "sampleRateHz", "Requested IQ Rate", "AetherSDR IQ rate request.",
+        {{"type", "dropdown"}, {"options", Parser::Sequence{
+            Parser::Map{{"label", "24 kS/s"}, {"value", "24000"}},
+            Parser::Map{{"label", "48 kS/s"}, {"value", "48000"}},
+            Parser::Map{{"label", "96 kS/s"}, {"value", "96000"}},
+        }}}));
     JST_CHECK(defineInterfaceConfig("bufferSize", "Block Size", "CF32 samples per output buffer.",
-                                    {{"type", "integer"}, {"minimum", 256}, {"maximum", 65536}}));
+                                    {{"type", "uint"}}));
     return Result::SUCCESS;
 }
 

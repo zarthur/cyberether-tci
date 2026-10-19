@@ -1,3 +1,4 @@
+#include <chrono>
 #include <functional>
 #include <vector>
 
@@ -14,11 +15,22 @@ namespace Jetstream::Modules {
 struct TciIqSourceImplNativeCpu : public TciIqSourceImpl,
                                   public NativeCpuRuntimeContext,
                                   public Scheduler::Context {
+    Result hasPendingCompute() override;
     Result computeSubmit() override;
 };
 
+Result TciIqSourceImplNativeCpu::hasPendingCompute() {
+    return client.waitForSamples(signal.size(), std::chrono::milliseconds(100))
+               ? Result::SUCCESS
+               : Result::YIELD;
+}
+
 Result TciIqSourceImplNativeCpu::computeSubmit() {
-    const auto metadata = client.metadata();
+    std::vector<std::complex<float>> samples(signal.size());
+    const auto read = client.popWithMetadata(samples);
+    if (read.samplesCopied != samples.size()) return Result::YIELD;
+
+    const auto& metadata = read.metadata;
     if (metadata.ready && metadata.iqStarted && metadata.sampleRateHz != 0 && metadata.panCenterHz != 0 &&
         (metadata.sampleRateHz != lastSampleRateHz || metadata.panCenterHz != lastCenterHz)) {
         lastSampleRateHz = metadata.sampleRateHz;
@@ -27,8 +39,6 @@ Result TciIqSourceImplNativeCpu::computeSubmit() {
         JST_CHECK(signal.setAttribute("frequency", static_cast<F32>(lastCenterHz)));
     }
 
-    std::vector<std::complex<float>> samples(signal.size());
-    (void)client.pop(samples);
     U64 index = 0;
     return AutomaticIterator<CF32>([&](auto& output) { output = samples[index++]; }, signal);
 }
