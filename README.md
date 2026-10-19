@@ -25,4 +25,4 @@ AetherSDR's TCI documentation says its server listens on every network interface
 
 The plugin ABI and bundle format are experimental. The initial build target is CyberEther 1.15.0 on macOS arm64; version and ABI compatibility must be pinned and verified during the scaffold work.
 
-See [ISSUES.md](ISSUES.md) for the proposed development tracker. These are local drafts until a private GitHub repository is available.
+Track development in the [GitHub issues](https://github.com/zarthur/cyberether-tci/issues).
