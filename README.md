@@ -44,7 +44,7 @@ The `.cep` packager stages a copy of the plugin, rewrites the SDK's `libjetstrea
 
 1. Copy `build/cyberether_tci_iq_source.cep` to `~/Documents/CyberEtherPlugins/cyberether_tci_iq_source.cep`, replacing an older copy if present, then restart CyberEther 1.15.0 so its plugin registry discovers the source block.
 2. In AetherSDR, enable its TCI server yourself and confirm its network exposure is acceptable. The source defaults to `127.0.0.1:50001`, receiver 0, and 48 kS/s. Keep tuning in AetherSDR.
-3. In CyberEther, choose **Examples** from the home screen and open **AetherSDR TCI IQ Spectrum**. The example starts the flowgraph and displays the spectrum and waterfall when the TCI stream is available.
+3. In CyberEther, choose **Examples** from the home screen and open **AetherSDR TCI IQ Spectrum**. The example starts the flowgraph and displays the spectrum and waterfall when the TCI stream is available. **Qualification status:** this example has only been checked at 48 kS/s; 24/96 kS/s and live rate/center-transition qualification remain outstanding.
 4. Stop the flowgraph with its stop control or close the flowgraph. If prompted to save the example, choose **Don't Save**. Closing the graph sends `iq_stop`; reopening it starts a new IQ subscription.
 
 ## Manual hardware qualification
