@@ -10,6 +10,7 @@
 namespace Jetstream {
 
 using U32 = std::uint32_t;
+using U64 = std::uint64_t;
 using F32 = float;
 enum class Result { SUCCESS, ERROR };
 

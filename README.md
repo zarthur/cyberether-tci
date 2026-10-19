@@ -11,6 +11,12 @@
 - Uses a bounded queue, drops oldest data on overflow, waits for complete output buffers, clears samples across metadata epochs/disconnects, and reconnects with backoff.
 - `examples/tci-iq-spectrum.yml` connects the source to CyberEther's spectrum analyzer and waterfall.
 
+## Queue diagnostics
+
+The source block's node body exposes two live CyberEther metrics: **Overflow drops** and **Metadata flushes**. Both are cumulative counts of CF32 sample pairs (one complex I/Q sample per count). Overflow drops count oldest queued samples and any oldest samples from an incoming frame that cannot fit in the bounded queue. Metadata flushes count queued samples intentionally cleared when the server confirms a new sample rate or pan-center epoch.
+
+Both counters reset when the source starts a new TCI client session and remain cumulative across that client's automatic reconnects. They saturate at `uint64_t` maximum instead of wrapping. Samples cleared during `iq_stop`, disconnect, or graph teardown are lifecycle cleanup and are excluded from both counters; malformed frames rejected by the parser are not queue drops. The metrics read cached lock-free counters through CyberEther's block-metric API; the UI callback does not take the sample-processing lock. See [CyberEther metadata and block metrics](https://cyberether.org/docs/metadata#block-metrics).
+
 ## Build and package
 
 Build against the CyberEther 1.15.0 development SDK on macOS arm64. Set `PKG_CONFIG_PATH` to that SDK's `lib/pkgconfig` directory:
@@ -31,7 +37,7 @@ The `.cep` packager stages a copy of the plugin, rewrites the SDK's `libjetstrea
 
 ## Verification
 
-- The Release CMake suite covers protocol parsing, synthetic fixtures, bounded buffering, cancellation/deadlines, block configuration, and loopback disconnect/reconnect. Packaging tests check host-library relocation and byte-identical archive output for identical inputs.
+- The Release CMake suite covers protocol parsing, synthetic fixtures, bounded buffering and diagnostics, cancellation/deadlines, block configuration, and loopback disconnect/reconnect. Packaging tests check host-library relocation and byte-identical archive output for identical inputs.
 - The macOS arm64 `.cep` was built against the isolated CyberEther 1.15.0 SDK, loaded by the real plugin loader, and registered the `tci_iq_source` module. The normal CyberEther 1.15.0 app displayed the example's spectrum/waterfall while receiving AetherSDR TCI IQ from the connected FLEX-6400 at 48 kS/s and a 14.074 MHz pan center. Aether's diagnostic log showed DAX IQ stream allocation/removal, `iq_stop`, zero remaining TCI clients, and PTT false.
 - Reconciled Aether log timing: the long visual session began with DAX IQ creation at 11:57:10.643 and disconnected at 12:23:15.131 with `connectionAgeMs=1564531`, `lastRxCommand=iq_stop`, and PTT false. A reconnect at 12:23:17.740 ended at 12:23:27.041 after 9,334 ms, also with `iq_stop`, zero clients, and PTT false. These records confirm that the long session was live Aether TCI/DAX, not a loopback fixture.
 - A later bounded visual run began at 12:59:46.200 and disconnected at 13:00:05.504 (`connectionAgeMs=19336`). The server recorded `lastRxCommand=iq_stop`, removed DAX stream `0x20000000`, reported zero TCI clients, and reported PTT false. An independent 180-second watchdog started at 12:59:32; it observed the stop marker at 13:01:38 and exited without signaling CyberEther. Afterward, `lsof` showed the Aether listener still present and no established client connections.

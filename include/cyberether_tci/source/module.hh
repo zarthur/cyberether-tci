@@ -13,9 +13,10 @@ struct TciIqSource : public Module::Config {
     U32 receiver = 0;
     U32 sampleRateHz = 48000;
     U32 bufferSize = 8192;
+    U64 diagnosticsId = 0;
 
     JST_MODULE_TYPE(tci_iq_source);
-    JST_MODULE_PARAMS(host, port, receiver, sampleRateHz, bufferSize);
+    JST_MODULE_PARAMS(host, port, receiver, sampleRateHz, bufferSize, diagnosticsId);
 };
 
 }  // namespace Jetstream::Modules

@@ -10,9 +10,11 @@
 #include <cctype>
 #include <cstring>
 #include <fcntl.h>
+#include <limits>
 #include <poll.h>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <netinet/in.h>
@@ -21,6 +23,26 @@
 
 namespace cyberether_tci {
 namespace {
+
+static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
+              "queue diagnostics require lock-free 64-bit atomics");
+
+std::mutex diagnosticsRegistryMutex;
+std::unordered_map<std::uint64_t, std::weak_ptr<ClientDiagnosticCounters>> diagnosticsRegistry;
+std::atomic<std::uint64_t> nextDiagnosticsId{1};
+
+void addSaturating(std::atomic<std::uint64_t>& counter, std::uint64_t amount) noexcept {
+    auto current = counter.load(std::memory_order_relaxed);
+    for (;;) {
+        const auto maximum = std::numeric_limits<std::uint64_t>::max();
+        const auto next = amount > maximum - current ? maximum : current + amount;
+        if (counter.compare_exchange_weak(current, next,
+                                          std::memory_order_relaxed,
+                                          std::memory_order_relaxed)) {
+            return;
+        }
+    }
+}
 
 constexpr std::string_view kWebSocketGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 constexpr std::size_t kMaxHttpResponse = 16384;
@@ -261,11 +283,49 @@ bool readWebSocketMessage(int fd, WsMessage& message) {
 
 }  // namespace
 
+std::uint64_t registerClientDiagnostics(const std::shared_ptr<ClientDiagnosticCounters>& counters) {
+    if (!counters) return 0;
+    std::lock_guard lock(diagnosticsRegistryMutex);
+    for (auto it = diagnosticsRegistry.begin(); it != diagnosticsRegistry.end();) {
+        if (it->second.expired()) it = diagnosticsRegistry.erase(it);
+        else ++it;
+    }
+    auto id = nextDiagnosticsId.fetch_add(1, std::memory_order_relaxed);
+    while (id == 0 || diagnosticsRegistry.contains(id)) {
+        id = nextDiagnosticsId.fetch_add(1, std::memory_order_relaxed);
+    }
+    diagnosticsRegistry.emplace(id, counters);
+    return id;
+}
+
+void unregisterClientDiagnostics(std::uint64_t id) noexcept {
+    if (id == 0) return;
+    std::lock_guard lock(diagnosticsRegistryMutex);
+    diagnosticsRegistry.erase(id);
+}
+
+std::shared_ptr<ClientDiagnosticCounters> findClientDiagnostics(std::uint64_t id) noexcept {
+    if (id == 0) return {};
+    std::lock_guard lock(diagnosticsRegistryMutex);
+    const auto found = diagnosticsRegistry.find(id);
+    if (found == diagnosticsRegistry.end()) return {};
+    auto counters = found->second.lock();
+    if (!counters) diagnosticsRegistry.erase(found);
+    return counters;
+}
+
 TciClient::~TciClient() { stop(); }
 
 bool TciClient::start(ClientConfig config) {
     if (worker_.joinable() || config.host != "127.0.0.1" || config.receiver > 3 ||
         !isFlex6400IqRate(config.requestedRateHz) || config.queueCapacity == 0) return false;
+    if (!config.diagnosticCounters) {
+        config.diagnosticCounters = std::make_shared<ClientDiagnosticCounters>();
+    }
+    std::atomic_store_explicit(&diagnosticCounters_, config.diagnosticCounters, std::memory_order_release);
+    activeDiagnosticCounters_ = config.diagnosticCounters.get();
+    config.diagnosticCounters->overflowDroppedSamplePairs.store(0, std::memory_order_relaxed);
+    config.diagnosticCounters->metadataEpochFlushedSamplePairs.store(0, std::memory_order_relaxed);
     config_ = std::move(config);
     queue_ = BoundedIqQueue(config_.queueCapacity);
     stopping_.store(false);
@@ -320,6 +380,15 @@ StreamReadResult TciClient::popWithMetadata(std::span<std::complex<float>> outpu
 StreamMetadata TciClient::metadata() const noexcept {
     std::lock_guard lock(stateMutex_);
     return metadata_;
+}
+
+ClientDiagnostics TciClient::diagnostics() const noexcept {
+    const auto counters = std::atomic_load_explicit(&diagnosticCounters_, std::memory_order_acquire);
+    if (!counters) return {};
+    return {
+        counters->overflowDroppedSamplePairs.load(std::memory_order_relaxed),
+        counters->metadataEpochFlushedSamplePairs.load(std::memory_order_relaxed),
+    };
 }
 
 void TciClient::clearSession() noexcept {
@@ -433,7 +502,9 @@ bool TciClient::runConnection() {
                     if (changed) {
                         ++metadata_.epoch;
                         if (metadata_.epoch == 0) ++metadata_.epoch;
-                        queue_.clear();
+                        const auto flushed = queue_.clear();
+                        addSaturating(activeDiagnosticCounters_->metadataEpochFlushedSamplePairs,
+                                      static_cast<std::uint64_t>(flushed));
                     }
                 }
                 stateChanged_.notify_all();
@@ -449,7 +520,9 @@ bool TciClient::runConnection() {
                     // 26.9.1. A valid, receiver-matched frame in the current
                     // confirmed metadata epoch is the fallback confirmation.
                     metadata_.iqStarted = true;
-                    queue_.push(*frame);
+                    const auto dropped = queue_.push(*frame);
+                    addSaturating(activeDiagnosticCounters_->overflowDroppedSamplePairs,
+                                  static_cast<std::uint64_t>(dropped));
                 }
                 stateChanged_.notify_all();
             }

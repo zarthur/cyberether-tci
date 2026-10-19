@@ -35,7 +35,7 @@ int main(int argc, char** argv) {
     config.port = port;
     config.receiver = 0;
     config.requestedRateHz = requestedRate;
-    config.queueCapacity = 16;
+    config.queueCapacity = 4;
     if (!client.start(config)) return 5;
 
     const auto waitForMetadata = [&](std::uint32_t rate, std::uint32_t center,
@@ -78,20 +78,26 @@ int main(int argc, char** argv) {
     }
     releaseFixture("activate");
     if (!waitForMetadata(requestedRate, 14074000, std::chrono::seconds(2), initial, true) ||
-        !client.waitForSamples(2, std::chrono::seconds(2))) {
+        !client.waitForSamples(4, std::chrono::seconds(2))) {
         client.stop();
         return 9;
     }
-    // Read only two of the fixture's three initial samples, deliberately
-    // leaving one sample queued when the server changes metadata epochs.
+    auto diagnostics = client.diagnostics();
+    if (diagnostics.overflowDroppedSamplePairs != 2 ||
+        diagnostics.metadataEpochFlushedSamplePairs != 0) {
+        client.stop();
+        return 10; // overflow counts CF32 pairs without counting an epoch flush
+    }
+    // The six-sample frame overflowed the four-sample queue by two. Read only
+    // two, leaving two queued pairs for the confirmed metadata epoch flush.
     std::array<std::complex<float>, 2> initialSamples{};
     const auto initialRead = client.popWithMetadata(initialSamples);
     if (initialRead.samplesCopied != initialSamples.size() ||
         initialRead.metadata.epoch != initial.epoch ||
-        initialSamples[0] != std::complex<float>(-0.75f, 0.75f) ||
-        initialSamples[1] != std::complex<float>(0.25f, -0.5f)) {
+        initialSamples[0] != std::complex<float>(-0.625f, -0.125f) ||
+        initialSamples[1] != std::complex<float>(0.125f, 0.25f)) {
         client.stop();
-        return 10;
+        return 11;
     }
     releaseFixture("initial-read");
 
@@ -99,27 +105,33 @@ int main(int argc, char** argv) {
     if (!waitForMetadata(changedRate, 14075000, std::chrono::seconds(2), changed, true) ||
         changed.epoch <= initial.epoch) {
         client.stop();
-        return 11;
+        return 12;
+    }
+    diagnostics = client.diagnostics();
+    if (diagnostics.overflowDroppedSamplePairs != 2 ||
+        diagnostics.metadataEpochFlushedSamplePairs != 2) {
+        client.stop();
+        return 13; // a metadata update reports queued-pair flushes separately
     }
 
     std::array<std::complex<float>, 3> samples;
     samples.fill({-9.0f, -9.0f});
     if (client.waitForSamples(samples.size(), std::chrono::milliseconds(100))) {
         client.stop();
-        return 12; // stale old-epoch sample must be cleared; only two new samples arrived
+        return 14; // stale old-epoch sample must be cleared; only two new samples arrived
     }
     auto partial = client.popWithMetadata(samples);
     if (partial.samplesCopied != 0 || partial.metadata.epoch != changed.epoch ||
         samples[0] != std::complex<float>(-9.0f, -9.0f) ||
         samples[2] != std::complex<float>(-9.0f, -9.0f)) {
         client.stop();
-        return 13;
+        return 15;
     }
     releaseFixture("partial-read");
 
     if (!client.waitForSamples(samples.size(), std::chrono::seconds(2))) {
         client.stop();
-        return 14;
+        return 16;
     }
     const auto changedRead = client.popWithMetadata(samples);
     if (changedRead.samplesCopied != samples.size() ||
@@ -130,7 +142,7 @@ int main(int argc, char** argv) {
         samples[1] != std::complex<float>(0.5f, 0.125f) ||
         samples[2] != std::complex<float>(-0.25f, 0.75f)) {
         client.stop();
-        return 15;
+        return 17;
     }
     releaseFixture("check-stop");
 
@@ -148,7 +160,7 @@ int main(int argc, char** argv) {
         client.waitForSamples(1, std::chrono::milliseconds(100)) ||
         rejectedSample[0] != std::complex<float>(-9.0f, -9.0f)) {
         client.stop();
-        return 16; // a frame after iq_stop must not re-arm this subscription
+        return 18; // a frame after iq_stop must not re-arm this subscription
     }
     releaseFixture("stop-checked");
 
@@ -157,7 +169,7 @@ int main(int argc, char** argv) {
         reconnected.epoch <= changedRead.metadata.epoch ||
         !client.waitForSamples(samples.size(), std::chrono::seconds(2))) {
         client.stop();
-        return 17;
+        return 19;
     }
     const auto reconnectRead = client.popWithMetadata(samples);
     client.stop();
@@ -167,7 +179,21 @@ int main(int argc, char** argv) {
         reconnectRead.metadata.epoch != reconnected.epoch ||
         samples[0] != std::complex<float>(-0.5f, 0.5f) ||
         samples[1] != std::complex<float>(0.75f, -0.75f) ||
-        samples[2] != std::complex<float>(0.125f, -0.125f)) return 18;
+        samples[2] != std::complex<float>(0.125f, -0.125f)) return 20;
+
+    diagnostics = client.diagnostics();
+    if (diagnostics.overflowDroppedSamplePairs != 2 ||
+        diagnostics.metadataEpochFlushedSamplePairs != 2) {
+        return 21; // counts persist across automatic reconnect and stop cleanup
+    }
+    if (!client.start(config)) return 22;
+    diagnostics = client.diagnostics();
+    if (diagnostics.overflowDroppedSamplePairs != 0 ||
+        diagnostics.metadataEpochFlushedSamplePairs != 0) {
+        client.stop();
+        return 23; // an explicit new client session starts fresh counters
+    }
+    client.stop();
 
     std::cout << "fake TCI no-echo activation, negative/stale-frame, lifecycle, and metadata-epoch checks passed at "
               << requestedRate << " -> " << changedRate << " samples/s\n";

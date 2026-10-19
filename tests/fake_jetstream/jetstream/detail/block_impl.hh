@@ -4,6 +4,8 @@
 #include "jetstream/module.hh"
 
 #include <memory>
+#include <any>
+#include <functional>
 #include <set>
 #include <string>
 #include <utility>
@@ -15,6 +17,14 @@ template<typename ConfigType>
 struct DynamicConfig : ConfigType {};
 
 struct Block::Impl {
+    struct Metric {
+        std::string key;
+        std::string label;
+        std::string help;
+        Parser::Map format;
+        std::function<std::any()> value;
+    };
+
     virtual ~Impl() = default;
     virtual Result configure() { return Result::SUCCESS; }
     virtual Result define() { return Result::SUCCESS; }
@@ -53,6 +63,17 @@ struct Block::Impl {
         return Result::SUCCESS;
     }
 
+    Result defineInterfaceMetric(const std::string& key, const std::string& label,
+                                 const std::string& help, const Parser::Map& format,
+                                 std::function<std::any()> metric) {
+        const auto type = format.find("type");
+        if (type == format.end()) return Result::ERROR;
+        const auto* name = std::any_cast<std::string>(&type->second.data);
+        if (name == nullptr || *name != "label" || !metric) return Result::ERROR;
+        metrics.push_back({key, label, help, format, std::move(metric)});
+        return Result::SUCCESS;
+    }
+
     Result moduleCreate(const std::string& name, const std::shared_ptr<Module::Config>& config,
                         const TensorMap&) {
         createdModuleName = name;
@@ -67,6 +88,7 @@ struct Block::Impl {
 
     std::vector<std::string> outputKeys;
     std::vector<std::pair<std::string, std::string>> configTypes;
+    std::vector<Metric> metrics;
     std::string createdModuleName;
     std::shared_ptr<Module::Config> createdConfig;
     std::pair<std::string, std::pair<std::string, std::string>> exposedOutput;
