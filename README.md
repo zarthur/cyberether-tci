@@ -1,6 +1,6 @@
 # CyberEther TCI IQ Source
 
-**Status: prototype implementation; native CyberEther integration is unverified.** The repository contains a receive-only TCI client, defensive control/IQ parsing, bounded buffering, a CyberEther 1.15.0 source-block scaffold, synthetic tests, and an example flowgraph. Synthetic protocol and lifecycle checks pass. The plugin has not been built against the real CyberEther SDK, packaged as a compiled `.cep`, or loaded in CyberEther.
+**Status: prototype; synthetic checks and CyberEther 1.15.0 plugin loading are verified, but live TCI and full graph execution are not.** The repository contains a receive-only TCI client, defensive control/IQ parsing, bounded buffering, a CyberEther source block, synthetic tests, and an example flowgraph. The macOS arm64 plugin compiles against CyberEther 1.15.0, packages as a `.cep`, and loads through the real SDK plugin loader with its source module registered. No AetherSDR server or radio was used.
 
 This source is intended to receive IQ from AetherSDR's TCI server while AetherSDR is connected to a FLEX-6400. It does not transmit or key PTT. Its outbound TCI commands are limited to `iq_samplerate`, `iq_start`, and `iq_stop`; it has no generic command sender. Tune in AetherSDR. The current Aether `dds` SET behavior must not be treated as a panadapter retune.
 
@@ -20,17 +20,18 @@ Synthetic checks run locally with strict-warning Clang C++20 builds and `-DNDEBU
 
 - Protocol fixtures cover the observed IQ header, sample decoding, supported rates, metadata parsing, malformed frames, and all-or-nothing queue reads.
 - A loopback fake TCI server covers the receive-only command sequence, 24/48/96 kS/s scenarios, rate/center metadata epochs, queue clearing, full-buffer readiness, disconnect, and reconnect.
-- Dedicated checks cover a disconnected-peer send, cancellation during a stalled loopback handshake, and protocol test failures remaining enabled under `NDEBUG`.
-- Python syntax checks and a synthetic `.cep` manifest/archive-shape check pass. The archive check uses a dummy binary; it does not produce a working plugin.
-- The block contract harness calls the real source block's `define()` and `create()` methods against a **fake Jetstream API**. It checks configuration descriptor types and mapping. It does not compile against CyberEther headers, validate the real ABI, or demonstrate host integration.
+- Dedicated checks cover a disconnected-peer send, cancellation during a stalled handshake, deterministic pending-connect deadline expiry/cancellation, and protocol test failures remaining enabled under `NDEBUG`.
+- A Release CMake build and all seven synthetic tests pass, including loopback-only fake-server and pending-connect deadline/cancellation checks. Python syntax checks also pass.
+- The plugin was compiled against the isolated CyberEther v1.15.0 SDK, packaged with its compiled macOS arm64 target, loaded by the actual CyberEther plugin loader, and verified to register the `tci_iq_source` module.
+- The block contract harness separately calls the source block's `define()` and `create()` methods against a **fake Jetstream API**. It checks configuration descriptor types and mapping. The actual host graph was not executed: the isolated headless CyberEther build reports no viewport backend.
 
 No AetherSDR server or radio was used for these checks.
 
 ## Native build and use
 
-The native plugin build is currently unverified. The installed CyberEther app is version 1.15.0 and includes `libjetstream.dylib`, but the app bundle and checked development locations do not contain Jetstream headers or `jetstream.pc`. Meson, Ninja, pkg-config, and CMake are unavailable in the current build environment. No tools or SDK were installed.
+The native build was verified on macOS arm64 against an isolated build of CyberEther v1.15.0 from its official source tag. The plugin compiles and packages as `cyberether_tci_iq_source.cep`; the real CyberEther plugin loader loads it and reports the `tci_iq_source` module. This only verified plugin loading and module registration. A headless host graph could not be executed because the isolated CyberEther build has no viewport backend, and live AetherSDR/FLEX qualification remains a separately gated step.
 
-Once the CyberEther 1.15.0 development SDK and build tools are available, use the official plugin build flow to build and package `cyberether_tci_iq_source.cep`, then verify host discovery, block creation, and graph execution. The current CMake test definitions are intended for SDK-independent synthetic checks; they have not been run through CMake in this environment.
+To use the example after review and a real host integration check, enable AetherSDR's TCI server yourself and confirm its listener exposure is acceptable. Then open the bundled TCI IQ Spectrum example and keep tuning in AetherSDR. This project does not enable TCI or change firewall/server settings. Starting the IQ subscription may cause AetherSDR to allocate or bind a DAX IQ channel for the selected receiver.
 
 To use the example after a real build, enable AetherSDR's TCI server yourself and confirm its listener exposure is acceptable. Then open the bundled TCI IQ Spectrum example and keep tuning in AetherSDR. This project does not enable TCI or change firewall/server settings. Starting the IQ subscription may cause AetherSDR to allocate or bind a DAX IQ channel for the selected receiver.
 

@@ -1,4 +1,5 @@
 #include "cyberether_tci/client.hpp"
+#include "connect_wait.hpp"
 #include "socket_io.hpp"
 
 #include <algorithm>
@@ -25,7 +26,6 @@ constexpr std::string_view kWebSocketGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B1
 constexpr std::size_t kMaxHttpResponse = 16384;
 constexpr std::size_t kMaxWebSocketMessage = kMaxIqFrameBytes + kTciAudioHeaderBytes;
 constexpr auto kConnectTimeout = std::chrono::seconds(3);
-constexpr auto kConnectPollInterval = std::chrono::milliseconds(50);
 
 enum class WsOpcode : std::uint8_t { Continuation = 0, Text = 1, Binary = 2, Close = 8, Ping = 9, Pong = 10 };
 
@@ -143,29 +143,18 @@ int connectTcp(const ClientConfig& config, const std::atomic<bool>& stopping) {
 
     if (connectResult != 0) {
         const auto deadline = std::chrono::steady_clock::now() + kConnectTimeout;
-        bool connected = false;
-        while (!stopping.load() && std::chrono::steady_clock::now() < deadline) {
-            const auto now = std::chrono::steady_clock::now();
-            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
-            const auto pollFor = std::min(kConnectPollInterval, remaining);
-            pollfd descriptor{fd, POLLOUT, 0};
-            const int pollResult = ::poll(&descriptor, 1, static_cast<int>(pollFor.count()));
-            if (pollResult < 0 && errno == EINTR) continue;
-            if (pollResult < 0) {
-                ::close(fd);
-                return -1;
-            }
-            if (pollResult == 0) continue;
-            int socketError = 0;
-            socklen_t errorLength = sizeof(socketError);
-            if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &errorLength) != 0 || socketError != 0) {
-                ::close(fd);
-                return -1;
-            }
-            connected = true;
-            break;
+        pollfd descriptor{fd, POLLOUT, 0};
+        const auto waitResult = detail::waitForWritableUntil<std::chrono::steady_clock>(
+            stopping, deadline, [&descriptor](std::chrono::milliseconds timeout) {
+                return ::poll(&descriptor, 1, static_cast<int>(timeout.count()));
+            });
+        if (waitResult != detail::ConnectWaitResult::Writable) {
+            ::close(fd);
+            return -1;
         }
-        if (!connected || stopping.load()) {
+        int socketError = 0;
+        socklen_t errorLength = sizeof(socketError);
+        if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &errorLength) != 0 || socketError != 0) {
             ::close(fd);
             return -1;
         }

@@ -30,6 +30,10 @@ target_link_libraries(tci_iq_connect_cancel_test PRIVATE tci_iq_protocol)
 add_test(NAME tci_iq_connect_cancel COMMAND tci_iq_connect_cancel_test)
 set_tests_properties(tci_iq_connect_cancel PROPERTIES TIMEOUT 5)
 
+add_executable(tci_iq_connect_deadline_test tests/connect_deadline_test.cpp)
+target_include_directories(tci_iq_connect_deadline_test PRIVATE src)
+add_test(NAME tci_iq_connect_deadline COMMAND tci_iq_connect_deadline_test)
+
 add_executable(tci_iq_block_contract_test tests/block_contract_test.cpp)
 target_include_directories(tci_iq_block_contract_test PRIVATE tests/fake_jetstream include src)
 add_test(NAME tci_iq_block_contract COMMAND tci_iq_block_contract_test)
