@@ -82,6 +82,8 @@ int main(int argc, char** argv) {
         client.stop();
         return 9;
     }
+    // Read only two of the fixture's three initial samples, deliberately
+    // leaving one sample queued when the server changes metadata epochs.
     std::array<std::complex<float>, 2> initialSamples{};
     const auto initialRead = client.popWithMetadata(initialSamples);
     if (initialRead.samplesCopied != initialSamples.size() ||
@@ -104,7 +106,7 @@ int main(int argc, char** argv) {
     samples.fill({-9.0f, -9.0f});
     if (client.waitForSamples(samples.size(), std::chrono::milliseconds(100))) {
         client.stop();
-        return 12; // fake server has sent only two samples in the new epoch
+        return 12; // stale old-epoch sample must be cleared; only two new samples arrived
     }
     auto partial = client.popWithMetadata(samples);
     if (partial.samplesCopied != 0 || partial.metadata.epoch != changed.epoch ||
