@@ -54,8 +54,10 @@ bool isFlex6400IqRate(std::uint32_t rateHz) noexcept;
 class BoundedIqQueue {
   public:
     explicit BoundedIqQueue(std::size_t capacity);
-    void clear() noexcept;
-    void push(const IqFrame& frame);
+    // Returns the number of queued samples intentionally removed.
+    std::size_t clear() noexcept;
+    // Returns the number of oldest samples discarded to stay within capacity.
+    std::size_t push(const IqFrame& frame);
     std::size_t pop(std::span<std::complex<float>> output) noexcept;
     std::size_t size() const noexcept { return size_; }
     std::size_t capacity() const noexcept { return data_.size(); }

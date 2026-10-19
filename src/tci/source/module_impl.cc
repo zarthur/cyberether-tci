@@ -40,6 +40,11 @@ Result TciIqSourceImpl::create() {
     clientConfig.receiver = config.receiver;
     clientConfig.requestedRateHz = config.sampleRateHz;
     clientConfig.queueCapacity = std::max<std::size_t>(config.bufferSize * 32ULL, 8192);
+    clientConfig.diagnosticCounters = cyberether_tci::findClientDiagnostics(config.diagnosticsId);
+    if (!clientConfig.diagnosticCounters) {
+        JST_ERROR("[TCI_IQ_SOURCE] Queue diagnostics were unavailable during module creation.");
+        return Result::ERROR;
+    }
     if (!client.start(std::move(clientConfig))) {
         JST_ERROR("[TCI_IQ_SOURCE] Could not start the TCI receive client.");
         return Result::ERROR;

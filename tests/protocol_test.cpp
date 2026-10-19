@@ -103,8 +103,8 @@ int main(int argc, char** argv) {
     CHECK(!parseIqFrame(nonfinite, 0));
 
     BoundedIqQueue queue(3);
-    queue.push(*decoded); // 2 samples
-    queue.push(*decoded); // overflow drops the oldest sample
+    CHECK(queue.push(*decoded) == 0); // 2 samples
+    CHECK(queue.push(*decoded) == 1); // overflow drops the oldest sample
     std::array<std::complex<float>, 4> tooLargeRead;
     tooLargeRead.fill({-9.0f, -9.0f});
     CHECK(queue.pop(tooLargeRead) == 0);
@@ -117,7 +117,22 @@ int main(int argc, char** argv) {
     CHECK(output[0] == decoded->samples[1]);
     CHECK(output[1] == decoded->samples[0]);
     CHECK(output[2] == decoded->samples[1]);
-    queue.clear();
+    CHECK(queue.clear() == 0);
+
+    IqFrame oversizedFrame = *decoded;
+    oversizedFrame.samples = {
+        {0.0f, 0.0f}, {1.0f, 1.0f}, {2.0f, 2.0f}, {3.0f, 3.0f}, {4.0f, 4.0f},
+    };
+    BoundedIqQueue oversizedQueue(3);
+    CHECK(oversizedQueue.push(*decoded) == 0);
+    CHECK(oversizedQueue.push(oversizedFrame) == 4); // old queued and oldest incoming samples are discarded
+    std::array<std::complex<float>, 3> oversizedOutput{};
+    CHECK(oversizedQueue.pop(oversizedOutput) == 3);
+    CHECK(oversizedOutput[0] == std::complex<float>(2.0f, 2.0f));
+    CHECK(oversizedOutput[1] == std::complex<float>(3.0f, 3.0f));
+    CHECK(oversizedOutput[2] == std::complex<float>(4.0f, 4.0f));
+    CHECK(oversizedQueue.push(*decoded) == 0);
+    CHECK(oversizedQueue.clear() == 2); // lifecycle/epoch clear count is observable separately
 
     std::cout << "synthetic TCI protocol fixtures passed\n";
     return 0;

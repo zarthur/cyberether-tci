@@ -6,12 +6,30 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <string>
 #include <thread>
 
 namespace cyberether_tci {
+
+struct ClientDiagnosticCounters {
+    std::atomic<std::uint64_t> overflowDroppedSamplePairs{0};
+    std::atomic<std::uint64_t> metadataEpochFlushedSamplePairs{0};
+};
+
+struct ClientDiagnostics {
+    std::uint64_t overflowDroppedSamplePairs = 0;
+    std::uint64_t metadataEpochFlushedSamplePairs = 0;
+};
+
+// The block owns counters while its module config crosses CyberEther's
+// serialize/deserialize boundary. Lookup happens only during module creation;
+// sample processing never accesses this registry.
+std::uint64_t registerClientDiagnostics(const std::shared_ptr<ClientDiagnosticCounters>& counters);
+void unregisterClientDiagnostics(std::uint64_t id) noexcept;
+std::shared_ptr<ClientDiagnosticCounters> findClientDiagnostics(std::uint64_t id) noexcept;
 
 struct ClientConfig {
     // The initial implementation only accepts this literal IPv4 loopback host;
@@ -21,6 +39,7 @@ struct ClientConfig {
     std::uint32_t receiver = 0;
     std::uint32_t requestedRateHz = 48000;
     std::size_t queueCapacity = 262144;
+    std::shared_ptr<ClientDiagnosticCounters> diagnosticCounters;
 };
 
 struct StreamMetadata {
@@ -51,6 +70,7 @@ class TciClient {
     bool waitForSamples(std::size_t required, std::chrono::milliseconds timeout) const noexcept;
     StreamReadResult popWithMetadata(std::span<std::complex<float>> output) noexcept;
     StreamMetadata metadata() const noexcept;
+    ClientDiagnostics diagnostics() const noexcept;
 
   private:
     void run();
@@ -68,6 +88,8 @@ class TciClient {
     std::condition_variable wake_;
     mutable std::condition_variable stateChanged_;
     StreamMetadata metadata_;
+    std::shared_ptr<ClientDiagnosticCounters> diagnosticCounters_;
+    ClientDiagnosticCounters* activeDiagnosticCounters_ = nullptr;
     // Set only after this session's explicit iq_start command was sent. Some
     // AetherSDR versions stream IQ without echoing iq_start; a validated frame
     // may confirm the subscription only while this request is outstanding.

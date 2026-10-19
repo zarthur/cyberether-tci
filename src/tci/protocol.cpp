@@ -148,19 +148,20 @@ std::optional<IqFrame> parseIqFrame(std::span<const std::byte> bytes,
 
 BoundedIqQueue::BoundedIqQueue(std::size_t capacity) : data_(capacity) {}
 
-void BoundedIqQueue::clear() noexcept {
+std::size_t BoundedIqQueue::clear() noexcept {
+    const auto cleared = size_;
     head_ = 0;
     size_ = 0;
+    return cleared;
 }
 
-void BoundedIqQueue::push(const IqFrame& frame) {
-    if (data_.empty() || frame.samples.empty()) return;
-    std::size_t first = 0;
-    std::size_t count = frame.samples.size();
-    if (count > data_.size()) {
-        first = count - data_.size();
-        count = data_.size();
-    }
+std::size_t BoundedIqQueue::push(const IqFrame& frame) {
+    if (data_.empty() || frame.samples.empty()) return 0;
+    const std::size_t count = std::min(frame.samples.size(), data_.size());
+    const std::size_t first = frame.samples.size() - count;
+    const std::size_t retainedBefore = data_.size() - count;
+    const std::size_t existingDropped = size_ > retainedBefore ? size_ - retainedBefore : 0;
+    const std::size_t dropped = first + existingDropped;
     for (std::size_t i = first; i < frame.samples.size(); ++i) {
         if (size_ == data_.size()) {
             head_ = (head_ + 1) % data_.size();
@@ -169,6 +170,7 @@ void BoundedIqQueue::push(const IqFrame& frame) {
         data_[(head_ + size_) % data_.size()] = frame.samples[i];
         ++size_;
     }
+    return dropped;
 }
 
 std::size_t BoundedIqQueue::pop(std::span<std::complex<float>> output) noexcept {

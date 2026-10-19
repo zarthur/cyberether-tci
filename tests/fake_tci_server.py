@@ -133,8 +133,9 @@ def run_scenario(executable, requested_rate, changed_rate):
                             send_frame(conn, 1, b"iq_start:1;")
                             wait_for_marker(marker_dir, "activate")
                             send_iq(conn, requested_rate, [
-                                (-0.75, 0.75), (0.25, -0.5), (-0.625, -0.125)
-                            ])  # third sample remains queued in the old epoch
+                                (-0.75, 0.75), (0.25, -0.5), (-0.625, -0.125),
+                                (0.125, 0.25), (-0.125, 0.5), (0.625, -0.75),
+                            ])  # a four-sample queue drops the first two pairs
                             wait_for_marker(marker_dir, "initial-read")
 
                             send_frame(conn, 1, (
@@ -158,7 +159,9 @@ def run_scenario(executable, requested_rate, changed_rate):
                             send_frame(conn, 1, (
                                 "ready;dds:0,14076000;iq_samplerate:%d;iq_start:0;" % requested_rate
                             ).encode("ascii"))
-                            send_iq(conn, requested_rate, [(-0.5, 0.5), (0.75, -0.75), (0.125, -0.125)])
+                            send_iq(conn, requested_rate, [
+                                (-0.5, 0.5), (0.75, -0.75), (0.125, -0.125), (0.25, 0.375)
+                            ])  # leave one queued sample for intentional disconnect cleanup
                             while True:
                                 opcode, payload = read_frame(conn)
                                 if opcode == 1 and payload == b"iq_stop:0;":
